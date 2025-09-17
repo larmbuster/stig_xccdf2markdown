@@ -27,6 +27,9 @@ python stig_converter.py          # Full conversion
 
 #### Option 1: Use Pre-built Image (Quickest)
 ```bash
+# Make the required directories
+mkdir stig_downloads stig_markdown_output
+
 # Pull the latest image from GitHub Container Registry
 # Images are automatically built on every commit to main
 podman pull ghcr.io/larmbuster/stig_xccdf2markdown:latest
@@ -40,6 +43,9 @@ podman run --rm --userns=keep-id \
 
 #### Option 2: Build Locally
 ```bash
+# Make the required directories
+mkdir stig_downloads stig_markdown_output
+
 # Using Podman Compose
 podman-compose up
 

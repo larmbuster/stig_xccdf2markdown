@@ -57,6 +57,19 @@ podman run --rm --userns=keep-id \
   stig-converter --test
 ```
 
+## 📦 Download Pre-built Results
+
+Instead of running the converter yourself, you can download pre-built STIG Markdown files directly from the GitHub Actions workflow:
+
+1. **Go to the [STIG Converter Pipeline](https://github.com/larmbuster/stig_xccdf2markdown/actions/workflows/stig-converter.yml)**
+2. **Click on any completed "STIG Converter Pipeline" workflow run**
+3. **Scroll down to the "Artifacts" section**
+4. **Download the artifacts:**
+   - `stig-markdown-{run_number}` - Contains all converted Markdown files (retained for 30 days)
+   - `stig-downloads-{run_number}` - Contains the original ZIP files (retained for 7 days)
+
+The workflow runs automatically every Sunday at 2 AM UTC.
+
 ## 📋 Prerequisites
 
 - **Python 3.8+** (for local installation)

@@ -2,8 +2,8 @@
 
 ![AI Assisted Yes](https://img.shields.io/badge/AI%20Assisted-Yes-green?style=for-the-badge)
 
-![Container Build](https://github.com/larmbuster/stig_xccdf2markdown/actions/workflows/build-container.yml/badge.svg?branch=main&event=push)
-![STIG Converter](https://github.com/larmbuster/stig_xccdf2markdown/actions/workflows/stig-converter.yml/badge.svg?branch=main&event=workflow_dispatch)
+![Container Build](https://github.com/larmbuster/stig_xccdf2markdown/actions/workflows/build-container.yml/badge.svg?branch=main)
+![STIG Converter](https://github.com/larmbuster/stig_xccdf2markdown/actions/workflows/stig-converter.yml/badge.svg?branch=main)
 
 A powerful tool that automatically downloads Security Technical Implementation Guides (STIGs) from cyber.mil and converts them into clean, readable Markdown format.
 

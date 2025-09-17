@@ -1,0 +1,149 @@
+name: STIG Converter Pipeline
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Conversion mode'
+        required: true
+        default: 'test'
+        type: choice
+        options:
+          - test
+          - full
+          - process-only
+          - download-only
+      max_pages:
+        description: 'Maximum pages to process (empty for all)'
+        required: false
+        type: string
+  
+  # Scheduled runs
+  schedule:
+    # Run weekly on Sundays at 2 AM UTC
+    - cron: '0 2 * * 0'
+
+jobs:
+  convert-stigs:
+    runs-on: ubuntu-latest
+    
+    # Timeout after 2 hours
+    timeout-minutes: 120
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Install Podman
+      run: |
+        sudo apt-get update
+        sudo apt-get -y install podman podman-compose
+    
+    - name: Build container image with Podman
+      run: |
+        podman build -f Containerfile -t stig-converter:latest .
+    
+    - name: Create output directories
+      run: |
+        mkdir -p stig_downloads stig_markdown_output
+        # Set permissions to allow container user to write
+        chmod 777 stig_downloads stig_markdown_output
+    
+    - name: Determine run mode
+      id: run-mode
+      run: |
+        # Use input mode if workflow_dispatch, otherwise use test mode for scheduled/push
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "mode=${{ inputs.mode }}" >> $GITHUB_OUTPUT
+          echo "max_pages=${{ inputs.max_pages }}" >> $GITHUB_OUTPUT
+        elif [ "${{ github.event_name }}" = "schedule" ]; then
+          echo "mode=full" >> $GITHUB_OUTPUT
+          echo "max_pages=" >> $GITHUB_OUTPUT
+        else
+          echo "mode=test" >> $GITHUB_OUTPUT
+          echo "max_pages=5" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Run STIG Converter
+      run: |
+        MODE="${{ steps.run-mode.outputs.mode }}"
+        MAX_PAGES="${{ steps.run-mode.outputs.max_pages }}"
+        
+        echo "Running in $MODE mode"
+        
+        # Build command arguments based on mode
+        if [ "$MODE" = "test" ]; then
+          CMD_ARGS="--test"
+        elif [ "$MODE" = "process-only" ]; then
+          CMD_ARGS="--process-only"
+        elif [ "$MODE" = "download-only" ]; then
+          CMD_ARGS="--download-only"
+        elif [ "$MODE" = "full" ]; then
+          # Full mode with optional page limit
+          if [ -n "$MAX_PAGES" ]; then
+            CMD_ARGS="--max-pages $MAX_PAGES"
+          else
+            # No arguments means process all pages (full mode)
+            CMD_ARGS=""
+          fi
+        else
+          echo "Unknown mode: $MODE"
+          exit 1
+        fi
+        
+        # Run the container with Podman (rootless by default)
+        podman run --rm \
+          --userns=keep-id \
+          --security-opt no-new-privileges \
+          --memory=2g \
+          -v ${{ github.workspace }}/stig_downloads:/app/stig_downloads:Z \
+          -v ${{ github.workspace }}/stig_markdown_output:/app/stig_markdown_output:Z \
+          -v ${{ github.workspace }}/xccdf_to_markdown.xsl:/app/xccdf_to_markdown.xsl:ro,Z \
+          -e CONTAINER_ENV=true \
+          -e STIG_HEADLESS=true \
+          -e MOZ_HEADLESS=1 \
+          stig-converter:latest \
+          $CMD_ARGS
+    
+    - name: Count results
+      id: count
+      run: |
+        MD_COUNT=$(find stig_markdown_output -name "*.md" -type f | wc -l)
+        ZIP_COUNT=$(find stig_downloads -name "*.zip" -type f | wc -l)
+        echo "markdown_count=$MD_COUNT" >> $GITHUB_OUTPUT
+        echo "zip_count=$ZIP_COUNT" >> $GITHUB_OUTPUT
+        echo "📊 Results: $MD_COUNT Markdown files, $ZIP_COUNT ZIP files"
+    
+    - name: Upload Markdown artifacts
+      if: steps.count.outputs.markdown_count != '0'
+      uses: actions/upload-artifact@v4
+      with:
+        name: stig-markdown-${{ github.run_number }}
+        path: stig_markdown_output/
+        retention-days: 30
+    
+    - name: Upload ZIP cache
+      if: steps.count.outputs.zip_count != '0'
+      uses: actions/upload-artifact@v4
+      with:
+        name: stig-downloads-${{ github.run_number }}
+        path: stig_downloads/
+        retention-days: 7
+    
+    - name: Create summary
+      run: |
+        echo "## STIG Conversion Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **Mode**: ${{ steps.run-mode.outputs.mode }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Markdown files generated**: ${{ steps.count.outputs.markdown_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **ZIP files downloaded**: ${{ steps.count.outputs.zip_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Run number**: ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Triggered by**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📦 Artifacts" >> $GITHUB_STEP_SUMMARY
+        echo "Results are available as downloadable artifacts:" >> $GITHUB_STEP_SUMMARY
+        echo "- **Markdown files**: \`stig-markdown-${{ github.run_number }}\` (retained for 30 days)" >> $GITHUB_STEP_SUMMARY
+        echo "- **ZIP cache**: \`stig-downloads-${{ github.run_number }}\` (retained for 7 days)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "ℹ️ Note: Files are stored as artifacts only and are not committed to the repository." >> $GITHUB_STEP_SUMMARY

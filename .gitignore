@@ -1,0 +1,4 @@
+stig_downloads/*
+!stig_downloads/.gitkeep
+stig_markdown_output/*
+!stig_markdown_output/.gitkeep

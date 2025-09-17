@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  stig-converter:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: stig-converter
+    environment:
+      # Core environment variables
+      - CONTAINER_ENV=true
+      - STIG_HEADLESS=true
+      - MOZ_HEADLESS=1
+      
+      # Optional: Override paths if needed
+      # - STIG_BASE_URL=https://www.cyber.mil/stigs/downloads/
+      # - STIG_DOWNLOAD_DIR=/app/stig_downloads
+      # - STIG_OUTPUT_DIR=/app/stig_markdown_output
+      # - STIG_XSLT_FILE=/app/xccdf_to_markdown.xsl
+    
+    volumes:
+      # Mount local directories for persistent storage
+      - ./stig_downloads:/app/stig_downloads:Z
+      - ./stig_markdown_output:/app/stig_markdown_output:Z
+      
+      # Optional: Mount the XSLT file if you want to modify it
+      - ./xccdf_to_markdown.xsl:/app/xccdf_to_markdown.xsl:ro,Z
+    
+    # Default command - override as needed
+    # Empty command runs in full mode, or specify: ["--test"], ["--process-only"], etc.
+    command: ["--test"]  # Currently set to test mode for safety
+    
+    # Resource limits (optional but recommended for CI/CD)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    
+    # Network settings
+    networks:
+      - stig-network
+    
+    # Security settings - Podman runs rootless by default
+    security_opt:
+      - no-new-privileges:true
+      - label=disable  # For SELinux compatibility
+    
+    # User namespace mapping for better rootless support
+    userns_mode: "keep-id"
+    
+    # Restart policy
+    restart: "no"
+
+networks:
+  stig-network:
+    driver: bridge

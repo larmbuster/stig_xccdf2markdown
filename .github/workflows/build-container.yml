@@ -1,0 +1,162 @@
+name: Build and Publish Container Image
+
+on:
+  push:
+    branches: [ main, dev ]  # Trigger on main and dev branches
+    paths-ignore:  # Don't trigger on documentation-only changes
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Podman
+      run: |
+        sudo apt-get update
+        sudo apt-get -y install podman
+
+    - name: Log in to GitHub Container Registry
+      if: github.event_name != 'pull_request'
+      run: |
+        echo "${{ secrets.GITHUB_TOKEN }}" | podman login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+    - name: Extract metadata
+      id: meta
+      run: |
+        # Generate tags and labels for the image
+        TAGS=""
+        LABELS=""
+        
+        # Always tag with the SHA
+        SHA_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
+        TAGS="$SHA_TAG"
+        
+        # For main branch, also tag as 'latest'
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          TAGS="$TAGS,$LATEST_TAG"
+        fi
+        
+        # For dev branch, tag as 'dev'
+        if [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
+          DEV_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev"
+          TAGS="$TAGS,$DEV_TAG"
+        fi
+        
+        # For tags, use the tag name (e.g., v1.0.0)
+        if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/}
+          VERSION_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION"
+          TAGS="$TAGS,$VERSION_TAG"
+        fi
+        
+        # For PR, tag with PR number
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          PR_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}"
+          TAGS="$PR_TAG"
+        fi
+        
+        echo "tags=$TAGS" >> $GITHUB_OUTPUT
+        echo "labels=org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" >> $GITHUB_OUTPUT
+        echo "labels=$labels,org.opencontainers.image.revision=${{ github.sha }}" >> $GITHUB_OUTPUT
+        echo "labels=$labels,org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+
+    - name: Build container image
+      run: |
+        # Build the image with all tags
+        IFS=',' read -ra TAG_ARRAY <<< "${{ steps.meta.outputs.tags }}"
+        TAG_ARGS=""
+        for tag in "${TAG_ARRAY[@]}"; do
+          TAG_ARGS="$TAG_ARGS -t $tag"
+        done
+        
+        podman build \
+          -f Containerfile \
+          $TAG_ARGS \
+          --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+          --label "org.opencontainers.image.revision=${{ github.sha }}" \
+          --label "org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+          --label "org.opencontainers.image.description=STIG XCCDF to Markdown Converter" \
+          --label "org.opencontainers.image.licenses=MIT" \
+          .
+
+    - name: Push container image
+      if: github.event_name != 'pull_request'
+      run: |
+        # Push all tags
+        IFS=',' read -ra TAG_ARRAY <<< "${{ steps.meta.outputs.tags }}"
+        for tag in "${TAG_ARRAY[@]}"; do
+          echo "Pushing $tag"
+          podman push $tag
+        done
+
+    - name: Generate image summary
+      if: github.event_name != 'pull_request'
+      run: |
+        echo "## Container Image Published 🎉" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "The container image has been published to GitHub Container Registry." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Tags Published:" >> $GITHUB_STEP_SUMMARY
+        IFS=',' read -ra TAG_ARRAY <<< "${{ steps.meta.outputs.tags }}"
+        for tag in "${TAG_ARRAY[@]}"; do
+          echo "- \`$tag\`" >> $GITHUB_STEP_SUMMARY
+        done
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Pull Command:" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "podman pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Run Command:" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "podman run --rm --userns=keep-id \\" >> $GITHUB_STEP_SUMMARY
+        echo "  -v ./stig_downloads:/app/stig_downloads:Z \\" >> $GITHUB_STEP_SUMMARY
+        echo "  -v ./stig_markdown_output:/app/stig_markdown_output:Z \\" >> $GITHUB_STEP_SUMMARY
+        echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest --test" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+    - name: Test the built image
+      run: |
+        # Quick test to ensure the image works
+        IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
+        
+        # For PRs, use the local image (not pushed)
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}"
+        fi
+        
+        # Create test directories with proper permissions
+        mkdir -p stig_downloads stig_markdown_output
+        chmod 777 stig_downloads stig_markdown_output
+        
+        echo "Testing image: $IMAGE_TAG"
+        # Test with 12 pages for a more comprehensive but limited test
+        podman run --rm --userns=keep-id \
+          -v ./stig_downloads:/app/stig_downloads:Z \
+          -v ./stig_markdown_output:/app/stig_markdown_output:Z \
+          $IMAGE_TAG --max-pages 12
+
+    - name: Upload test artifacts
+      uses: actions/upload-artifact@v4
+      if: always()  # Upload artifacts even if test fails
+      with:
+        name: container-test-results-${{ github.sha }}
+        path: |
+          stig_downloads/
+          stig_markdown_output/
+        retention-days: 7

@@ -12,7 +12,7 @@ A powerful tool that automatically downloads Security Technical Implementation G
 ### Local Installation
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/larmbuster/stig_xccdf2markdown.git
 cd stig_xccdf2markdown
 
 # Install dependencies

@@ -208,14 +208,11 @@ git push origin v1.0.0
 ## 📊 Image Size Optimization
 
 The current image is optimized for:
-- Small size (~800MB)
+- Enterprise support (RHEL UBI 9)
 - Fast startup
 - Security (non-root user)
+- Reproducibility (version-pinned dependencies)
 
-Future optimizations could include:
-- Multi-stage builds (already implemented)
-- Alpine Linux base (would need Firefox ESR package)
-- Distroless images (complex with Firefox requirement)
 
 ## 🔗 Related Documentation
 - [Container Usage Guide](CONTAINER_USAGE.md)

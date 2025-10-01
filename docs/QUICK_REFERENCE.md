@@ -148,7 +148,7 @@ podman run --memory="4g" --userns=keep-id \
 
 | Problem | Solution |
 |---------|----------|
-| Firefox not found | Install Firefox or use Docker |
+| Firefox not found | Install Firefox or use Podman container |
 | No files found | Check cyber.mil manually |
 | Permission denied | `chmod 755` directories |
 | Out of memory | Use `--max-pages` or increase RAM |

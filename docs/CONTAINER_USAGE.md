@@ -32,12 +32,12 @@ brew install podman
 podman machine init
 podman machine start
 
+# RHEL/Fedora/CentOS
+sudo dnf install podman
+
 # Ubuntu/Debian
 sudo apt-get update
 sudo apt-get install podman
-
-# RHEL/Fedora
-sudo dnf install podman
 
 # Windows
 # Download and install Podman Desktop from podman.io
@@ -91,9 +91,9 @@ podman run --rm \
 ## 📦 Container Architecture
 
 ### Base Image
-- **Python 3.11 slim** - Minimal footprint
-- **Firefox ESR** - Stable browser for scraping
-- **Geckodriver** - Pre-installed WebDriver
+- **RHEL UBI 9 with Python 3.11** - Enterprise-grade base image
+- **Firefox 134.0** - Direct from Mozilla (not in UBI repos)
+- **Geckodriver v0.36.0** - Pre-installed WebDriver
 
 ### Security Features
 - **Rootless by default** - Podman runs without root privileges

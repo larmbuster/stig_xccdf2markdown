@@ -136,7 +136,8 @@ The repository includes a complete GitHub Actions workflow that runs automatical
 ```bash
 # Install Podman (if not already installed)
 # macOS: brew install podman && podman machine init && podman machine start
-# Linux: sudo apt install podman  # or dnf/yum
+# RHEL/Fedora: sudo dnf install podman
+# Ubuntu/Debian: sudo apt install podman
 # Windows: Install Podman Desktop from podman.io
 
 # Build and run

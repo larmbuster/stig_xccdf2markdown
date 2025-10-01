@@ -49,12 +49,12 @@ This tool is designed for security professionals, system administrators, and com
 ### Container Architecture
 
 #### Container Image (Podman)
-- **Base:** Python 3.11 slim
-- **Browser:** Firefox ESR (Extended Support Release)
-- **WebDriver:** Geckodriver (auto-installed)
+- **Base:** RHEL UBI 9 with Python 3.11
+- **Browser:** Firefox 134.0 (from Mozilla)
+- **WebDriver:** Geckodriver v0.36.0 (pre-installed)
 - **Security:** Rootless operation by default
 - **SELinux:** Full support with `:Z` volume labels
-- **Size:** ~800MB
+- **Size:** ~1.67GB
 
 #### Volume Mounts
 - `/app/stig_downloads` - Persistent storage for ZIPs
@@ -244,7 +244,7 @@ This tool is designed for security professionals, system administrators, and com
 
 ### Dependencies
 - **Python packages:** selenium, requests, lxml, webdriver-manager
-- **Browser:** Firefox (local) or Firefox ESR (container)
+- **Browser:** Firefox (local) or Firefox 134.0 (container)
 - **Container:** Podman
 
 ## 🎨 Design Decisions
@@ -253,7 +253,7 @@ This tool is designed for security professionals, system administrators, and com
 - Better automation support than Chrome
 - More stable in headless mode
 - Consistent across platforms
-- ESR version for containers
+- Direct from Mozilla for containers (not repository-dependent)
 
 ### Why XSLT?
 - Native XML transformation

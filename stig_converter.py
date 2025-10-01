@@ -153,8 +153,8 @@ def get_stig_zip_links(headless=True, max_pages_limit=None):
                 print("4. Try running as Administrator if permission issues occur")
             elif is_linux:
                 print("2. On Linux: Install via package manager")
+                print("   RHEL/Fedora: sudo dnf install firefox")
                 print("   Ubuntu/Debian: sudo apt install firefox")
-                print("   Fedora: sudo dnf install firefox")
             raise
         
         print(f"Starting Firefox browser...")

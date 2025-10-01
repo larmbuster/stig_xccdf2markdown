@@ -34,11 +34,11 @@ df -h
   ```
 - **Linux:** Install via package manager
   ```bash
+  # RHEL/Fedora
+  sudo dnf install firefox
+  
   # Ubuntu/Debian
   sudo apt install firefox
-  
-  # Fedora
-  sudo dnf install firefox
   ```
 - **Windows:** Download from [Mozilla Firefox](https://www.mozilla.org/firefox/)
 

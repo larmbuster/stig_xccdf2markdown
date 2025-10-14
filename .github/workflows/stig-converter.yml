@@ -1,4 +1,6 @@
 name: STIG Converter Pipeline
+permissions:
+  contents: read
 
 on:
   # Manual trigger

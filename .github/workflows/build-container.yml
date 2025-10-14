@@ -12,6 +12,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  TEST_PAGES: "12"
+  IMAGE_ARCHIVE: ${{ github.workspace }}/artifacts/image.tar
 
 jobs:
   build-and-push:
@@ -19,6 +21,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      security-events: write
       
     steps:
     - name: Checkout repository
@@ -39,7 +42,7 @@ jobs:
       run: |
         # Generate tags and labels for the image
         TAGS=""
-        LABELS=""
+        LABELS="org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}"
         
         # Always tag with the SHA
         SHA_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
@@ -70,10 +73,10 @@ jobs:
           TAGS="$PR_TAG"
         fi
         
+        LABELS="$LABELS,org.opencontainers.image.revision=${{ github.sha }}"
+        LABELS="$LABELS,org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
         echo "tags=$TAGS" >> $GITHUB_OUTPUT
-        echo "labels=org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" >> $GITHUB_OUTPUT
-        echo "labels=$labels,org.opencontainers.image.revision=${{ github.sha }}" >> $GITHUB_OUTPUT
-        echo "labels=$labels,org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+        echo "labels=$LABELS" >> $GITHUB_OUTPUT
 
     - name: Build container image
       run: |
@@ -94,41 +97,8 @@ jobs:
           --label "org.opencontainers.image.licenses=MIT" \
           .
 
-    - name: Push container image
-      if: github.event_name != 'pull_request'
-      run: |
-        # Push all tags
-        IFS=',' read -ra TAG_ARRAY <<< "${{ steps.meta.outputs.tags }}"
-        for tag in "${TAG_ARRAY[@]}"; do
-          echo "Pushing $tag"
-          podman push $tag
-        done
+    # NOTE: push step moved to after tests and scans so we don't publish untested images
 
-    - name: Generate image summary
-      if: github.event_name != 'pull_request'
-      run: |
-        echo "## Container Image Published 🎉" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "The container image has been published to GitHub Container Registry." >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Tags Published:" >> $GITHUB_STEP_SUMMARY
-        IFS=',' read -ra TAG_ARRAY <<< "${{ steps.meta.outputs.tags }}"
-        for tag in "${TAG_ARRAY[@]}"; do
-          echo "- \`$tag\`" >> $GITHUB_STEP_SUMMARY
-        done
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Pull Command:" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-        echo "podman pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Run Command:" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-        echo "podman run --rm --userns=keep-id \\" >> $GITHUB_STEP_SUMMARY
-        echo "  -v ./stig_downloads:/app/stig_downloads:Z \\" >> $GITHUB_STEP_SUMMARY
-        echo "  -v ./stig_markdown_output:/app/stig_markdown_output:Z \\" >> $GITHUB_STEP_SUMMARY
-        echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest --test" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
     - name: Test the built image
       run: |
@@ -145,18 +115,411 @@ jobs:
         chmod 777 stig_downloads stig_markdown_output
         
         echo "Testing image: $IMAGE_TAG"
-        # Test with 12 pages for a more comprehensive but limited test
+        # Test with limited pages defined by env TEST_PAGES
         podman run --rm --userns=keep-id \
           -v ./stig_downloads:/app/stig_downloads:Z \
           -v ./stig_markdown_output:/app/stig_markdown_output:Z \
-          $IMAGE_TAG --max-pages 12
+          $IMAGE_TAG --max-pages "${{ env.TEST_PAGES }}"
 
-    - name: Upload test artifacts
+    - name: Count results
+      id: count
+      run: |
+        MD_COUNT=$(find stig_markdown_output -name "*.md" -type f | wc -l)
+        ZIP_COUNT=$(find stig_downloads -name "*.zip" -type f | wc -l)
+        echo "markdown_count=$MD_COUNT" >> $GITHUB_OUTPUT
+        echo "zip_count=$ZIP_COUNT" >> $GITHUB_OUTPUT
+        echo "📊 Results: $MD_COUNT Markdown files, $ZIP_COUNT ZIP files"
+    
+    - name: Install Syft for SBOM generation
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+        syft version
+    
+    - name: Generate Software Bill of Materials (SBOM)
+      run: |
+        IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
+        
+        # For PRs, use the local image
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}"
+        fi
+        
+        # Create directories
+        mkdir -p sbom "$(dirname "${{ env.IMAGE_ARCHIVE }}")"
+        
+        # Save the image to a local Docker archive once for all tools
+        if [ ! -f "${{ env.IMAGE_ARCHIVE }}" ]; then
+          podman image save --format docker-archive -o "${{ env.IMAGE_ARCHIVE }}" "$IMAGE_TAG"
+        fi
+        
+        # Generate SBOM in multiple formats for maximum compatibility
+        echo "📋 Generating Software Bill of Materials..."
+        
+        # CycloneDX JSON (widely supported, includes detailed dependency info)
+        syft scan --scope all-layers --output cyclonedx-json=sbom/sbom-cyclonedx.json "docker-archive:${{ env.IMAGE_ARCHIVE }}"
+        
+        # SPDX JSON (SPDX 2.3 standard format)
+        syft scan --scope all-layers --output spdx-json=sbom/sbom-spdx.json "docker-archive:${{ env.IMAGE_ARCHIVE }}"
+        
+        # Syft JSON (most detailed, includes file metadata)
+        syft scan --scope all-layers --output syft-json=sbom/sbom-syft.json "docker-archive:${{ env.IMAGE_ARCHIVE }}"
+        
+        # Human-readable table format
+        syft scan --scope all-layers --output table=sbom/sbom-summary.txt "docker-archive:${{ env.IMAGE_ARCHIVE }}"
+        
+        # Generate metadata file with build info
+        {
+          echo "Software Bill of Materials (SBOM)"
+          echo "Generated: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          echo "Image: $IMAGE_TAG"
+          echo "Repository: ${{ github.repository }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Workflow Run: ${{ github.run_number }}"
+          echo "Triggered by: ${{ github.event_name }}"
+          echo ""
+          echo "This SBOM contains detailed information about all software packages,"
+          echo "dependencies, and components included in the container image."
+          echo ""
+          echo "Formats included:"
+          echo "- sbom-cyclonedx.json: CycloneDX 1.4+ format (machine-readable)"
+          echo "- sbom-spdx.json: SPDX 2.3 format (standard compliance)"
+          echo "- sbom-syft.json: Syft native format (most detailed)"
+          echo "- sbom-summary.txt: Human-readable summary"
+          echo ""
+          echo "For vulnerability scanning, use these SBOMs with tools like:"
+          echo "- Grype: grype sbom:sbom-syft.json"
+          echo "- Trivy: trivy sbom sbom-cyclonedx.json"
+          echo "- OWASP Dependency-Check: dependency-check --scan sbom-cyclonedx.json"
+        } > sbom/sbom-metadata.txt
+        
+        echo "✅ SBOM generation complete"
+        echo "📊 Package summary:"
+        head -20 sbom/sbom-summary.txt
+    
+    - name: Upload SBOM artifacts
       uses: actions/upload-artifact@v4
-      if: always()  # Upload artifacts even if test fails
+      if: always()
       with:
-        name: container-test-results-${{ github.sha }}
-        path: |
-          stig_downloads/
-          stig_markdown_output/
+        name: sbom-${{ github.run_number }}
+        path: sbom/
+        retention-days: 90
+    
+    - name: Install Trivy for security scanning
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq wget gnupg lsb-release
+        sudo mkdir -p /etc/apt/keyrings
+        curl -fsSL https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /etc/apt/keyrings/trivy.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install -y trivy
+        trivy --version
+    
+    - name: Install Grype for vulnerability scanning
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+        grype version
+    
+    - name: Run container security scans
+      continue-on-error: true
+      run: |
+        IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
+        
+        # For PRs, use the local image
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}"
+        fi
+        
+        # Create directories
+        mkdir -p security-scan "$(dirname "${{ env.IMAGE_ARCHIVE }}")"
+        
+        # Ensure the shared image archive exists
+        if [ ! -f "${{ env.IMAGE_ARCHIVE }}" ]; then
+          podman image save --format docker-archive -o "${{ env.IMAGE_ARCHIVE }}" "$IMAGE_TAG"
+        fi
+        
+        echo "🔍 Running container security scans..."
+        
+        # Trivy - Comprehensive vulnerability and misconfiguration scanning
+        echo "Running Trivy vulnerability scan..."
+        
+        # Scan for vulnerabilities (OS packages and application dependencies)
+        trivy image --input "${{ env.IMAGE_ARCHIVE }}" \
+          --severity HIGH,CRITICAL --ignore-unfixed \
+          --format json --output security-scan/trivy-vulnerabilities.json || true
+        trivy image --input "${{ env.IMAGE_ARCHIVE }}" \
+          --severity HIGH,CRITICAL --ignore-unfixed \
+          --format table --output security-scan/trivy-vulnerabilities.txt || true
+        trivy image --input "${{ env.IMAGE_ARCHIVE }}" \
+          --severity HIGH,CRITICAL --ignore-unfixed \
+          --format sarif --output security-scan/trivy-vulnerabilities.sarif || true
+        
+        # Scan for secrets
+        trivy image --input "${{ env.IMAGE_ARCHIVE }}" --scanners secret --format json --output security-scan/trivy-secrets.json || true
+        trivy image --input "${{ env.IMAGE_ARCHIVE }}" --scanners secret --format table --output security-scan/trivy-secrets.txt || true
+        
+        # Scan for misconfigurations
+        trivy image --input "${{ env.IMAGE_ARCHIVE }}" --scanners config --format json --output security-scan/trivy-misconfig.json || true
+        trivy image --input "${{ env.IMAGE_ARCHIVE }}" --scanners config --format table --output security-scan/trivy-misconfig.txt || true
+        
+        # Generate summary statistics from Trivy
+        echo "Extracting vulnerability statistics..."
+        CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
+        HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
+        MEDIUM=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
+        LOW=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="LOW")] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
+        
+        # Split by class (OS vs language packages)
+        VULN_OS_COUNT=$(jq '[.Results[]? | select(.Class=="os-pkgs") | .Vulnerabilities[]?] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
+        VULN_APP_COUNT=$(jq '[.Results[]? | select(.Class=="lang-pkgs") | .Vulnerabilities[]?] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
+        
+        # Secrets and misconfig counts
+        SECRET_TOTAL=$(jq '[.Results[]?.Secrets[]?] | length' security-scan/trivy-secrets.json 2>/dev/null || echo "0")
+        MISCONFIG_CRITICAL=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="CRITICAL")] | length' security-scan/trivy-misconfig.json 2>/dev/null || echo "0")
+        MISCONFIG_HIGH=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="HIGH")] | length' security-scan/trivy-misconfig.json 2>/dev/null || echo "0")
+        
+        echo "VULN_OS_COUNT=$VULN_OS_COUNT" >> $GITHUB_ENV
+        echo "VULN_APP_COUNT=$VULN_APP_COUNT" >> $GITHUB_ENV
+        echo "SECRET_TOTAL=$SECRET_TOTAL" >> $GITHUB_ENV
+        echo "MISCONFIG_CRITICAL=$MISCONFIG_CRITICAL" >> $GITHUB_ENV
+        echo "MISCONFIG_HIGH=$MISCONFIG_HIGH" >> $GITHUB_ENV
+        
+        # Build top CVEs table (unique CVE+pkg, up to 20 rows)
+        {
+          echo "| CVE | Package | Installed | Fixed | Severity |"
+          echo "|---|---|---|---|---|"
+          if [ -s security-scan/trivy-vulnerabilities.json ]; then
+            jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL" or .Severity=="HIGH") | "\(.VulnerabilityID)|\(.PkgName)|\(.InstalledVersion)|\(.FixedVersion // "N/A")|\(.Severity)"' \
+              security-scan/trivy-vulnerabilities.json \
+            | awk -F'|' '!seen[$1"|"$2]++' \
+            | while IFS='|' read -r cve pkg inst fixed sev; do printf "| %s | %s | %s | %s | %s |\n" "$cve" "$pkg" "$inst" "$fixed" "$sev"; done \
+            | head -20
+          fi
+        } > security-scan/top-cves.md
+        
+        echo "CRITICAL=$CRITICAL" >> $GITHUB_ENV
+        echo "HIGH=$HIGH" >> $GITHUB_ENV
+        echo "MEDIUM=$MEDIUM" >> $GITHUB_ENV
+        echo "LOW=$LOW" >> $GITHUB_ENV
+        
+        # Grype - Scan using the SBOM we generated
+        echo "Running Grype scan against SBOM..."
+        grype sbom:sbom/sbom-syft.json -o json > security-scan/grype-vulnerabilities.json || true
+        grype sbom:sbom/sbom-syft.json -o table > security-scan/grype-vulnerabilities.txt || true
+        grype sbom:sbom/sbom-syft.json -o sarif > security-scan/grype-vulnerabilities.sarif || true
+        
+        # Generate metadata file
+        {
+          echo "Container Security Scan Results"
+          echo "Generated: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          echo "Image: $IMAGE_TAG"
+          echo "Repository: ${{ github.repository }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo ""
+          echo "Vulnerability Summary (Trivy):"
+          echo "- CRITICAL: $CRITICAL"
+          echo "- HIGH: $HIGH"
+          echo "- MEDIUM: $MEDIUM"
+          echo "- LOW: $LOW"
+          echo ""
+          echo "Scan Types Performed:"
+          echo "1. Vulnerability Scanning (OS packages & dependencies)"
+          echo "2. Secret Scanning (exposed credentials, API keys)"
+          echo "3. Misconfiguration Scanning (security best practices)"
+          echo "4. SBOM-based Scanning (comprehensive dependency analysis)"
+          echo ""
+          echo "Tools Used:"
+          echo "- Trivy: Comprehensive multi-scanner (vulnerabilities, secrets, misconfigs)"
+          echo "- Grype: SBOM-based vulnerability scanner"
+          echo ""
+          echo "Report Formats:"
+          echo "- JSON: Machine-readable for automation"
+          echo "- SARIF: GitHub Security tab integration"
+          echo "- TXT: Human-readable tables"
+          echo ""
+          echo "Note: Scans may contain false positives. Review results carefully."
+          echo "For production use, consider setting up policy-based gates."
+        } > security-scan/scan-metadata.txt
+        
+        echo "✅ Security scanning complete"
+        echo "📊 Vulnerability summary: CRITICAL=$CRITICAL, HIGH=$HIGH, MEDIUM=$MEDIUM, LOW=$LOW"
+        
+        # Display summary from reports
+        echo ""
+        echo "Top vulnerabilities found:"
+        head -30 security-scan/trivy-vulnerabilities.txt || echo "No vulnerability report available"
+
+        echo "\nGenerating recommended upgrade summary..."
+        # Build a small markdown table of unique packages with available fixes (top 20)
+        {
+          echo "| Package | Installed | Fixed | Severity |"
+          echo "|---|---|---|---|"
+          if [ -s security-scan/trivy-vulnerabilities.json ]; then
+            jq -r '.Results[]?.Vulnerabilities[]? | select(.FixedVersion != null and .FixedVersion != "") | "\(.PkgName)|\(.InstalledVersion)|\(.FixedVersion)|\(.Severity)"' \
+              security-scan/trivy-vulnerabilities.json \
+            | awk -F'|' '!seen[$1]++' \
+            | sort -t'|' -k4,4 \
+            | while IFS='|' read -r pkg inst fixed sev; do printf "| %s | %s | %s | %s |\n" "$pkg" "$inst" "$fixed" "$sev"; done \
+            | head -20
+          fi
+        } > security-scan/upgrade-summary.md
+    
+    - name: Upload security scan results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: security-scan-${{ github.run_number }}
+        path: security-scan/
+        retention-days: 90
+
+    - name: Push container image
+      if: github.event_name != 'pull_request'
+      run: |
+        # Install skopeo for robust pushes with retries
+        sudo apt-get update
+        sudo apt-get install -y skopeo
+        
+        # Ensure the shared image archive exists (save from first tag if missing)
+        if [ ! -f "${{ env.IMAGE_ARCHIVE }}" ]; then
+          IFS=',' read -ra TAG_ARRAY <<< "${{ steps.meta.outputs.tags }}"
+          FIRST_TAG="${TAG_ARRAY[0]}"
+          echo "Saving image archive from $FIRST_TAG"
+          mkdir -p "$(dirname "${{ env.IMAGE_ARCHIVE }}")"
+          podman image save --format docker-archive -o "${{ env.IMAGE_ARCHIVE }}" "$FIRST_TAG"
+        fi
+
+        # Push all tags after tests and scans using skopeo with retries from docker-archive
+        IFS=',' read -ra TAG_ARRAY <<< "${{ steps.meta.outputs.tags }}"
+        for tag in "${TAG_ARRAY[@]}"; do
+          echo "Pushing $tag via skopeo from docker-archive"
+          skopeo copy --retry-times 5 \
+            --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            "docker-archive:${{ env.IMAGE_ARCHIVE }}" "docker://${tag}"
+        done
+    
+    - name: Upload SARIF to GitHub Security
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      continue-on-error: true
+      with:
+        sarif_file: security-scan/trivy-vulnerabilities.sarif
+        category: container-security
+    
+    - name: Summarize vulnerability results
+      run: |
+        echo "🔍 Vulnerability summary (non-blocking)"
+        echo "CRITICAL=$CRITICAL, HIGH=$HIGH, MEDIUM=$MEDIUM, LOW=$LOW"
+
+    - name: Generate image summary
+      if: github.event_name != 'pull_request'
+      run: |
+        echo "## Container Image Published 🎉" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "The container image has been successfully built, tested, and published to GitHub Container Registry." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        echo "### 📊 Build Statistics" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch**: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit**: \`${GITHUB_SHA::7}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Triggered by**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Build time**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+        echo "- **Test mode**: ${TEST_PAGES:-N/A} pages processed" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        echo "### 🧪 Test Results" >> $GITHUB_STEP_SUMMARY
+        echo "- **Markdown files generated**: ${{ steps.count.outputs.markdown_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **ZIP files downloaded**: ${{ steps.count.outputs.zip_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Status**: ✅ Tests passed" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        echo "### 🔒 Security Scan Results" >> $GITHUB_STEP_SUMMARY
+        echo "Vulnerability counts by severity:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+        echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| 🔴 CRITICAL | ${CRITICAL:-N/A} |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🟠 HIGH | ${HIGH:-N/A} |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🟡 MEDIUM | ${MEDIUM:-N/A} |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🟢 LOW | ${LOW:-N/A} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **OS package vulns**: ${VULN_OS_COUNT:-0}" >> $GITHUB_STEP_SUMMARY
+        echo "- **App dependency vulns**: ${VULN_APP_COUNT:-0}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Secret findings**: ${SECRET_TOTAL:-0}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Misconfig CRITICAL/HIGH**: ${MISCONFIG_CRITICAL:-0}/${MISCONFIG_HIGH:-0}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Top packages with available fixes (up to 10):**" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Package | Installed | Fixed | Severity |" >> $GITHUB_STEP_SUMMARY
+        echo "|---|---|---|---|" >> $GITHUB_STEP_SUMMARY
+        if [ -f security-scan/upgrade-summary.md ]; then
+          head -10 security-scan/upgrade-summary.md >> $GITHUB_STEP_SUMMARY || true
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Top CVEs (CRITICAL/HIGH) (up to 10):**" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| CVE | Package | Installed | Fixed | Severity |" >> $GITHUB_STEP_SUMMARY
+        echo "|---|---|---|---|---|" >> $GITHUB_STEP_SUMMARY
+        if [ -f security-scan/top-cves.md ]; then
+          head -10 security-scan/top-cves.md >> $GITHUB_STEP_SUMMARY || true
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Scans Performed:**" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Vulnerability scanning (OS packages & dependencies)" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Secret scanning (credentials, API keys)" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Misconfiguration detection" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ SBOM-based analysis" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "💡 View detailed results in the **Security** tab and download the \`security-scan-${{ github.run_number }}\` artifact." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        echo "### 📦 Artifacts Available" >> $GITHUB_STEP_SUMMARY
+        echo "Results from the test run and supply chain documentation are available as downloadable artifacts:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Test Results:**" >> $GITHUB_STEP_SUMMARY
+        echo "- **Markdown files**: \`stig-markdown-${{ github.run_number }}\` (retained for 30 days)" >> $GITHUB_STEP_SUMMARY
+        echo "- **ZIP cache**: \`stig-downloads-${{ github.run_number }}\` (retained for 7 days)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Supply Chain Security:**" >> $GITHUB_STEP_SUMMARY
+        echo "- **SBOM**: \`sbom-${{ github.run_number }}\` (90 days)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Security scans**: \`security-scan-${{ github.run_number }}\` (90 days)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        echo "### 🏷️ Tags Published:" >> $GITHUB_STEP_SUMMARY
+        IFS=',' read -ra TAG_ARRAY <<< "${{ steps.meta.outputs.tags }}"
+        for tag in "${TAG_ARRAY[@]}"; do
+          echo "- \`$tag\`" >> $GITHUB_STEP_SUMMARY
+        done
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        echo "### 🚀 Usage Commands" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Pull the image:**" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "podman pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Run the converter:**" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "podman run --rm --userns=keep-id \\" >> $GITHUB_STEP_SUMMARY
+        echo "  -v ./stig_downloads:/app/stig_downloads:Z \\" >> $GITHUB_STEP_SUMMARY
+        echo "  -v ./stig_markdown_output:/app/stig_markdown_output:Z \\" >> $GITHUB_STEP_SUMMARY
+        echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest --test" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+    
+    - name: Upload Markdown artifacts
+      if: steps.count.outputs.markdown_count != '0'
+      uses: actions/upload-artifact@v4
+      with:
+        name: stig-markdown-${{ github.run_number }}
+        path: stig_markdown_output/
+        retention-days: 30
+    
+    - name: Upload ZIP cache
+      if: steps.count.outputs.zip_count != '0'
+      uses: actions/upload-artifact@v4
+      with:
+        name: stig-downloads-${{ github.run_number }}
+        path: stig_downloads/
         retention-days: 7

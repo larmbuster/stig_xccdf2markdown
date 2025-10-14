@@ -270,6 +270,34 @@ jobs:
         MEDIUM=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
         LOW=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="LOW")] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
         
+        # Split by class (OS vs language packages)
+        VULN_OS_COUNT=$(jq '[.Results[]? | select(.Class=="os-pkgs") | .Vulnerabilities[]?] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
+        VULN_APP_COUNT=$(jq '[.Results[]? | select(.Class=="lang-pkgs") | .Vulnerabilities[]?] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
+        
+        # Secrets and misconfig counts
+        SECRET_TOTAL=$(jq '[.Results[]?.Secrets[]?] | length' security-scan/trivy-secrets.json 2>/dev/null || echo "0")
+        MISCONFIG_CRITICAL=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="CRITICAL")] | length' security-scan/trivy-misconfig.json 2>/dev/null || echo "0")
+        MISCONFIG_HIGH=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="HIGH")] | length' security-scan/trivy-misconfig.json 2>/dev/null || echo "0")
+        
+        echo "VULN_OS_COUNT=$VULN_OS_COUNT" >> $GITHUB_ENV
+        echo "VULN_APP_COUNT=$VULN_APP_COUNT" >> $GITHUB_ENV
+        echo "SECRET_TOTAL=$SECRET_TOTAL" >> $GITHUB_ENV
+        echo "MISCONFIG_CRITICAL=$MISCONFIG_CRITICAL" >> $GITHUB_ENV
+        echo "MISCONFIG_HIGH=$MISCONFIG_HIGH" >> $GITHUB_ENV
+        
+        # Build top CVEs table (unique CVE+pkg, up to 20 rows)
+        {
+          echo "| CVE | Package | Installed | Fixed | Severity |"
+          echo "|---|---|---|---|---|"
+          if [ -s security-scan/trivy-vulnerabilities.json ]; then
+            jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL" or .Severity=="HIGH") | "\(.VulnerabilityID)|\(.PkgName)|\(.InstalledVersion)|\(.FixedVersion // "N/A")|\(.Severity)"' \
+              security-scan/trivy-vulnerabilities.json \
+            | awk -F'|' '!seen[$1"|"$2]++' \
+            | while IFS='|' read -r cve pkg inst fixed sev; do printf "| %s | %s | %s | %s | %s |\n" "$cve" "$pkg" "$inst" "$fixed" "$sev"; done \
+            | head -20
+          fi
+        } > security-scan/top-cves.md
+        
         echo "CRITICAL=$CRITICAL" >> $GITHUB_ENV
         echo "HIGH=$HIGH" >> $GITHUB_ENV
         echo "MEDIUM=$MEDIUM" >> $GITHUB_ENV
@@ -322,6 +350,21 @@ jobs:
         echo ""
         echo "Top vulnerabilities found:"
         head -30 security-scan/trivy-vulnerabilities.txt || echo "No vulnerability report available"
+
+        echo "\nGenerating recommended upgrade summary..."
+        # Build a small markdown table of unique packages with available fixes (top 20)
+        {
+          echo "| Package | Installed | Fixed | Severity |"
+          echo "|---|---|---|---|"
+          if [ -s security-scan/trivy-vulnerabilities.json ]; then
+            jq -r '.Results[]?.Vulnerabilities[]? | select(.FixedVersion != null and .FixedVersion != "") | "\(.PkgName)|\(.InstalledVersion)|\(.FixedVersion)|\(.Severity)"' \
+              security-scan/trivy-vulnerabilities.json \
+            | awk -F'|' '!seen[$1]++' \
+            | sort -t'|' -k4,4 \
+            | while IFS='|' read -r pkg inst fixed sev; do printf "| %s | %s | %s | %s |\n" "$pkg" "$inst" "$fixed" "$sev"; done \
+            | head -20
+          fi
+        } > security-scan/upgrade-summary.md
     
     - name: Upload security scan results
       uses: actions/upload-artifact@v4
@@ -401,6 +444,27 @@ jobs:
         echo "| 🟡 MEDIUM | ${MEDIUM:-N/A} |" >> $GITHUB_STEP_SUMMARY
         echo "| 🟢 LOW | ${LOW:-N/A} |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **OS package vulns**: ${VULN_OS_COUNT:-0}" >> $GITHUB_STEP_SUMMARY
+        echo "- **App dependency vulns**: ${VULN_APP_COUNT:-0}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Secret findings**: ${SECRET_TOTAL:-0}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Misconfig CRITICAL/HIGH**: ${MISCONFIG_CRITICAL:-0}/${MISCONFIG_HIGH:-0}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Top packages with available fixes (up to 10):**" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Package | Installed | Fixed | Severity |" >> $GITHUB_STEP_SUMMARY
+        echo "|---|---|---|---|" >> $GITHUB_STEP_SUMMARY
+        if [ -f security-scan/upgrade-summary.md ]; then
+          head -10 security-scan/upgrade-summary.md >> $GITHUB_STEP_SUMMARY || true
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Top CVEs (CRITICAL/HIGH) (up to 10):**" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| CVE | Package | Installed | Fixed | Severity |" >> $GITHUB_STEP_SUMMARY
+        echo "|---|---|---|---|---|" >> $GITHUB_STEP_SUMMARY
+        if [ -f security-scan/top-cves.md ]; then
+          head -10 security-scan/top-cves.md >> $GITHUB_STEP_SUMMARY || true
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Scans Performed:**" >> $GITHUB_STEP_SUMMARY
         echo "- ✅ Vulnerability scanning (OS packages & dependencies)" >> $GITHUB_STEP_SUMMARY
         echo "- ✅ Secret scanning (credentials, API keys)" >> $GITHUB_STEP_SUMMARY
@@ -418,15 +482,8 @@ jobs:
         echo "- **ZIP cache**: \`stig-downloads-${{ github.run_number }}\` (retained for 7 days)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Supply Chain Security:**" >> $GITHUB_STEP_SUMMARY
-        echo "- **Software Bill of Materials (SBOM)**: \`sbom-${{ github.run_number }}\` (retained for 90 days)" >> $GITHUB_STEP_SUMMARY
-        echo "  - Includes: CycloneDX, SPDX, Syft JSON formats + human-readable summary" >> $GITHUB_STEP_SUMMARY
-        echo "  - Contains: All packages, dependencies, versions, licenses, and component metadata" >> $GITHUB_STEP_SUMMARY
-        echo "  - Use with: Grype, Trivy, OWASP Dependency-Check for vulnerability scanning" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "- **Security Scan Results**: \`security-scan-${{ github.run_number }}\` (retained for 90 days)" >> $GITHUB_STEP_SUMMARY
-        echo "  - Includes: Trivy & Grype scan results in JSON, SARIF, and TXT formats" >> $GITHUB_STEP_SUMMARY
-        echo "  - Contains: Vulnerabilities, secrets, misconfigurations, and remediation guidance" >> $GITHUB_STEP_SUMMARY
-        echo "  - Also available in GitHub Security tab (SARIF upload)" >> $GITHUB_STEP_SUMMARY
+        echo "- **SBOM**: \`sbom-${{ github.run_number }}\` (90 days)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Security scans**: \`security-scan-${{ github.run_number }}\` (90 days)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
         echo "### 🏷️ Tags Published:" >> $GITHUB_STEP_SUMMARY

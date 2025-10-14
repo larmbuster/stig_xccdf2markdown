@@ -332,13 +332,22 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y skopeo
         
-        # Push all tags after tests and scans using skopeo with retries
+        # Ensure the shared image archive exists (save from first tag if missing)
+        if [ ! -f "${{ env.IMAGE_ARCHIVE }}" ]; then
+          IFS=',' read -ra TAG_ARRAY <<< "${{ steps.meta.outputs.tags }}"
+          FIRST_TAG="${TAG_ARRAY[0]}"
+          echo "Saving image archive from $FIRST_TAG"
+          mkdir -p "$(dirname "${{ env.IMAGE_ARCHIVE }}")"
+          podman image save --format docker-archive -o "${{ env.IMAGE_ARCHIVE }}" "$FIRST_TAG"
+        fi
+
+        # Push all tags after tests and scans using skopeo with retries from docker-archive
         IFS=',' read -ra TAG_ARRAY <<< "${{ steps.meta.outputs.tags }}"
         for tag in "${TAG_ARRAY[@]}"; do
-          echo "Pushing $tag via skopeo"
+          echo "Pushing $tag via skopeo from docker-archive"
           skopeo copy --retry-times 5 \
             --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
-            "containers-storage:${tag}" "docker://${tag}"
+            "docker-archive:${{ env.IMAGE_ARCHIVE }}" "docker://${tag}"
         done
     
     - name: Upload SARIF to GitHub Security

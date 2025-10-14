@@ -88,7 +88,9 @@ WORKDIR /app
 
 # Copy requirements first for better layer caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Ensure modern pip/setuptools to avoid known vulnerabilities and resolver issues
+RUN python -m pip install --upgrade --no-cache-dir pip setuptools \
+    && pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY stig_converter.py .

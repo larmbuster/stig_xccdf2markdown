@@ -156,16 +156,16 @@ jobs:
         echo "📋 Generating Software Bill of Materials..."
         
         # CycloneDX JSON (widely supported, includes detailed dependency info)
-        syft packages "docker-archive:${{ env.IMAGE_ARCHIVE }}" -o cyclonedx-json=sbom/sbom-cyclonedx.json
+        syft scan --scope all-layers --output cyclonedx-json=sbom/sbom-cyclonedx.json "docker-archive:${{ env.IMAGE_ARCHIVE }}"
         
         # SPDX JSON (SPDX 2.3 standard format)
-        syft packages "docker-archive:${{ env.IMAGE_ARCHIVE }}" -o spdx-json=sbom/sbom-spdx.json
+        syft scan --scope all-layers --output spdx-json=sbom/sbom-spdx.json "docker-archive:${{ env.IMAGE_ARCHIVE }}"
         
         # Syft JSON (most detailed, includes file metadata)
-        syft packages "docker-archive:${{ env.IMAGE_ARCHIVE }}" -o syft-json=sbom/sbom-syft.json
+        syft scan --scope all-layers --output syft-json=sbom/sbom-syft.json "docker-archive:${{ env.IMAGE_ARCHIVE }}"
         
         # Human-readable table format
-        syft packages "docker-archive:${{ env.IMAGE_ARCHIVE }}" -o table=sbom/sbom-summary.txt
+        syft scan --scope all-layers --output table=sbom/sbom-summary.txt "docker-archive:${{ env.IMAGE_ARCHIVE }}"
         
         # Generate metadata file with build info
         {
@@ -328,11 +328,17 @@ jobs:
     - name: Push container image
       if: github.event_name != 'pull_request'
       run: |
-        # Push all tags after tests and scans
+        # Install skopeo for robust pushes with retries
+        sudo apt-get update
+        sudo apt-get install -y skopeo
+        
+        # Push all tags after tests and scans using skopeo with retries
         IFS=',' read -ra TAG_ARRAY <<< "${{ steps.meta.outputs.tags }}"
         for tag in "${TAG_ARRAY[@]}"; do
-          echo "Pushing $tag"
-          podman push $tag
+          echo "Pushing $tag via skopeo"
+          skopeo copy --retry-times 5 \
+            --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            "containers-storage:${tag}" "docker://${tag}"
         done
     
     - name: Upload SARIF to GitHub Security

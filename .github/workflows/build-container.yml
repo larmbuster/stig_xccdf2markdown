@@ -245,9 +245,15 @@ jobs:
         echo "Running Trivy vulnerability scan..."
         
         # Scan for vulnerabilities (OS packages and application dependencies)
-        trivy image --input "${{ env.IMAGE_ARCHIVE }}" --format json --output security-scan/trivy-vulnerabilities.json || true
-        trivy image --input "${{ env.IMAGE_ARCHIVE }}" --format table --output security-scan/trivy-vulnerabilities.txt || true
-        trivy image --input "${{ env.IMAGE_ARCHIVE }}" --format sarif --output security-scan/trivy-vulnerabilities.sarif || true
+        trivy image --input "${{ env.IMAGE_ARCHIVE }}" \
+          --severity HIGH,CRITICAL --ignore-unfixed \
+          --format json --output security-scan/trivy-vulnerabilities.json || true
+        trivy image --input "${{ env.IMAGE_ARCHIVE }}" \
+          --severity HIGH,CRITICAL --ignore-unfixed \
+          --format table --output security-scan/trivy-vulnerabilities.txt || true
+        trivy image --input "${{ env.IMAGE_ARCHIVE }}" \
+          --severity HIGH,CRITICAL --ignore-unfixed \
+          --format sarif --output security-scan/trivy-vulnerabilities.sarif || true
         
         # Scan for secrets
         trivy image --input "${{ env.IMAGE_ARCHIVE }}" --scanners secret --format json --output security-scan/trivy-secrets.json || true

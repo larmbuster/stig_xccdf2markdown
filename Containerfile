@@ -88,8 +88,8 @@ WORKDIR /app
 
 # Copy requirements first for better layer caching
 COPY requirements.txt .
-# Ensure modern pip/setuptools to avoid known vulnerabilities and resolver issues
-RUN python -m pip install --upgrade --no-cache-dir pip setuptools \
+# Ensure modern pip and install Python dependencies
+RUN python -m pip install --upgrade --no-cache-dir pip \
     && pip install --no-cache-dir -r requirements.txt
 
 # Copy application files

@@ -4,6 +4,8 @@ Complete guide for integrating the STIG converter into CI/CD pipelines using Pod
 
 ## ✅ GitHub Actions (Included)
 
+See also: [Container Image Security Scanning](./SECURITY_SCANNING.md)
+
 The repository includes a complete GitHub Actions workflow (`.github/workflows/stig-converter.yml`).
 
 ### Quick Setup

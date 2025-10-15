@@ -12,7 +12,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  TEST_PAGES: "12"
+  TEST_PAGES: "13"
   IMAGE_ARCHIVE: ${{ github.workspace }}/artifacts/image.tar
 
 jobs:
@@ -245,6 +245,11 @@ jobs:
         echo "Running Trivy vulnerability scan..."
         
         # Scan for vulnerabilities (OS packages and application dependencies)
+        # Actionable JSON (all severities, ignore unfixed) used for summary counts
+        trivy image --input "${{ env.IMAGE_ARCHIVE }}" \
+          --ignore-unfixed \
+          --format json --output security-scan/trivy-vulnerabilities-actionable.json || true
+        # Filtered outputs (smaller) for artifacts and SARIF upload
         trivy image --input "${{ env.IMAGE_ARCHIVE }}" \
           --severity HIGH,CRITICAL --ignore-unfixed \
           --format json --output security-scan/trivy-vulnerabilities.json || true
@@ -265,14 +270,14 @@ jobs:
         
         # Generate summary statistics from Trivy
         echo "Extracting vulnerability statistics..."
-        CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
-        HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
-        MEDIUM=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
-        LOW=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="LOW")] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
+        CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' security-scan/trivy-vulnerabilities-actionable.json 2>/dev/null || echo "0")
+        HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' security-scan/trivy-vulnerabilities-actionable.json 2>/dev/null || echo "0")
+        MEDIUM=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' security-scan/trivy-vulnerabilities-actionable.json 2>/dev/null || echo "0")
+        LOW=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="LOW")] | length' security-scan/trivy-vulnerabilities-actionable.json 2>/dev/null || echo "0")
         
         # Split by class (OS vs language packages)
-        VULN_OS_COUNT=$(jq '[.Results[]? | select(.Class=="os-pkgs") | .Vulnerabilities[]?] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
-        VULN_APP_COUNT=$(jq '[.Results[]? | select(.Class=="lang-pkgs") | .Vulnerabilities[]?] | length' security-scan/trivy-vulnerabilities.json 2>/dev/null || echo "0")
+        VULN_OS_COUNT=$(jq '[.Results[]? | select(.Class=="os-pkgs") | .Vulnerabilities[]?] | length' security-scan/trivy-vulnerabilities-actionable.json 2>/dev/null || echo "0")
+        VULN_APP_COUNT=$(jq '[.Results[]? | select(.Class=="lang-pkgs") | .Vulnerabilities[]?] | length' security-scan/trivy-vulnerabilities-actionable.json 2>/dev/null || echo "0")
         
         # Secrets and misconfig counts
         SECRET_TOTAL=$(jq '[.Results[]?.Secrets[]?] | length' security-scan/trivy-secrets.json 2>/dev/null || echo "0")

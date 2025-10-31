@@ -10,6 +10,7 @@ from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.firefox.service import Service
 from webdriver_manager.firefox import GeckoDriverManager
 from urllib.parse import urljoin
+from typing import Optional, Tuple, List, Dict, Any
 import time
 import random
 import argparse
@@ -33,18 +34,63 @@ XSLT_FILE = os.environ.get('STIG_XSLT_FILE', "xccdf_to_markdown.xsl")
 # Container detection - helps optimize settings when running in Podman
 IS_CONTAINER = os.environ.get('CONTAINER_ENV', 'false').lower() == 'true'
 
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize a filename to prevent directory traversal attacks.
+    
+    Removes path separators and other dangerous characters from filenames.
+    This prevents attacks like "../../etc/passwd" from escaping the intended directory.
+    
+    Args:
+        filename: The filename to sanitize
+        
+    Returns:
+        A sanitized filename safe for use in os.path.join()
+    """
+    # Remove path separators and other dangerous characters
+    filename = os.path.basename(filename)
+    # Remove any remaining path components
+    filename = filename.replace('/', '').replace('\\', '')
+    # Remove null bytes
+    filename = filename.replace('\x00', '')
+    return filename
+
+
 def create_directories():
-    """Create necessary directories if they don't exist."""
+    """
+    Create necessary directories if they don't exist.
+    
+    Creates the download and output directories as specified by the DOWNLOAD_DIR
+    and OUTPUT_DIR configuration variables. Uses exist_ok=True to avoid errors
+    if directories already exist.
+    """
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print(f"Created/verified directories: '{DOWNLOAD_DIR}' and '{OUTPUT_DIR}'")
 
-def get_stig_zip_links(headless=True, max_pages_limit=None):
-    """Scrape the STIG download page using Selenium with session handling to find all download buttons with data-link ending in STIG.zip.
+def get_stig_zip_links(headless: bool = True, max_pages_limit: Optional[int] = None) -> Tuple[List[str], List[Dict[str, Any]], int, int, int]:
+    """
+    Scrape the STIG download page using Selenium to find all download links.
+    
+    This function navigates through paginated content on the cyber.mil STIG downloads
+    page, extracts all links to STIG.zip files, and returns them along with browser
+    session cookies for use in subsequent downloads.
     
     Args:
-        headless: Run browser in headless mode
-        max_pages_limit: Maximum number of pages to process (None for all pages)
+        headless: Run browser in headless mode (default: True)
+        max_pages_limit: Maximum number of pages to process. If None, processes up to
+                        200 pages or until no new content is found (default: None)
+    
+    Returns:
+        A tuple containing:
+        - absolute_links: List of absolute URLs to STIG.zip files
+        - cookies: List of browser session cookies (for use with requests library)
+        - pages_processed: Number of pages processed during scraping
+        - total_download_buttons_analyzed: Total number of download buttons found
+        - total_stig_zip_matches: Total number of STIG.zip links found (including duplicates)
+        
+        On error, returns: ([], [], 0, 0, 0)
     """
     print(f"Scraping {BASE_URL} for STIG .zip file links...")
     if max_pages_limit:
@@ -74,9 +120,6 @@ def get_stig_zip_links(headless=True, max_pages_limit=None):
         
         # Set preferences for better stability in containers
         firefox_options.set_preference("dom.ipc.plugins.enabled.libflashplayer.so", False)
-        # REMOVED: Anti-bot detection measures
-        # firefox_options.set_preference("dom.webdriver.enabled", False)
-        # firefox_options.set_preference("useAutomationExtension", False)
         
         # Disable caching in containers for better memory usage
         firefox_options.set_preference("browser.cache.disk.enable", False)
@@ -108,11 +151,6 @@ def get_stig_zip_links(headless=True, max_pages_limit=None):
     # Common options for all environments
     firefox_options.add_argument("--width=1920")
     firefox_options.add_argument("--height=1080")
-    # REMOVED: Anti-bot detection measures
-    # firefox_options.add_argument("--disable-blink-features=AutomationControlled")
-    # firefox_options.set_preference("general.useragent.override", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0")
-    # firefox_options.set_preference("dom.webdriver.enabled", False)
-    # firefox_options.set_preference("useAutomationExtension", False)
     firefox_options.set_preference("browser.download.folderList", 2)
     firefox_options.set_preference("browser.download.dir", os.path.abspath(DOWNLOAD_DIR))
     firefox_options.set_preference("browser.download.useDownloadDir", True)
@@ -211,14 +249,6 @@ def get_stig_zip_links(headless=True, max_pages_limit=None):
         
         if not driver:
             raise Exception("Failed to create Firefox driver after all retries")
-        
-        # REMOVED: Anti-bot detection JavaScript
-        # driver.execute_script("""
-        #     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        #     Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-        #     Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-        #     window.chrome = {runtime: {}};
-        # """)
         
         # Navigate directly to the STIG downloads page
         print("Navigating to STIG downloads page...")
@@ -707,9 +737,30 @@ def get_stig_zip_links(headless=True, max_pages_limit=None):
         if driver:
             driver.quit()
 
-def download_file(url, directory, session=None, cookies=None):
-    """Download a single file from a URL into a specified directory using session and cookies."""
-    local_filename = os.path.join(directory, url.split('/')[-1])
+def download_file(url: str, directory: str, session=None, cookies=None) -> Optional[str]:
+    """
+    Download a single file from a URL into a specified directory.
+    
+    Uses the provided session and cookies for authenticated requests. Skips download
+    if the file already exists locally. Sanitizes the filename to prevent directory
+    traversal attacks.
+    
+    Args:
+        url: The URL of the file to download
+        directory: The directory where the file should be saved
+        session: Optional requests.Session object for connection pooling (default: None)
+        cookies: Optional list of cookie dictionaries from browser session (default: None)
+    
+    Returns:
+        The local file path if download succeeds, None if download fails
+    
+    Raises:
+        requests.exceptions.RequestException: If the download request fails
+    """
+    # Sanitize filename to prevent directory traversal attacks
+    unsafe_filename = url.split('/')[-1]
+    safe_filename = sanitize_filename(unsafe_filename)
+    local_filename = os.path.join(directory, safe_filename)
     if os.path.exists(local_filename):
         print(f"Skipping {local_filename}, already exists.")
         return local_filename
@@ -720,21 +771,7 @@ def download_file(url, directory, session=None, cookies=None):
         if session is None:
             session = requests.Session()
         
-        # REMOVED: Browser mimicking headers
-        # headers = {
-        #     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
-        #     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        #     'Accept-Language': 'en-US,en;q=0.5',
-        #     'Accept-Encoding': 'gzip, deflate, br',
-        #     'Connection': 'keep-alive',
-        #     'Upgrade-Insecure-Requests': '1',
-        #     'Sec-Fetch-Dest': 'document',
-        #     'Sec-Fetch-Mode': 'navigate',
-        #     'Sec-Fetch-Site': 'none',
-        #     'Cache-Control': 'max-age=0'
-        # }
-        
-        # Use default Python requests headers (will identify as bot)
+        # Use default Python requests headers
         headers = {}
         
         # Add cookies if provided
@@ -754,8 +791,21 @@ def download_file(url, directory, session=None, cookies=None):
         print(f"Error: Failed to download {url}. {e}")
         return None
 
-def process_existing_zips(xslt_transformer):
-    """Process all existing ZIP files in the download directory without downloading new ones."""
+def process_existing_zips(xslt_transformer) -> Tuple[int, int]:
+    """
+    Process all existing ZIP files in the download directory without downloading new ones.
+    
+    Scans the download directory for ZIP files and processes each one, extracting XML
+    files and converting them to Markdown using the provided XSLT transformer.
+    
+    Args:
+        xslt_transformer: The XSLT transformation function from lxml.etree.XSLT
+    
+    Returns:
+        A tuple containing:
+        - total_xml_files_found: Total number of XML files found in all ZIP files
+        - total_xml_files_processed: Total number of XML files successfully converted
+    """
     print(f"\n--- Processing Existing ZIP Files ---")
     
     # Find all .zip files in the download directory
@@ -763,7 +813,9 @@ def process_existing_zips(xslt_transformer):
     if os.path.exists(DOWNLOAD_DIR):
         for file in os.listdir(DOWNLOAD_DIR):
             if file.endswith('.zip'):
-                zip_files.append(os.path.join(DOWNLOAD_DIR, file))
+                # Sanitize filename to prevent directory traversal
+                safe_filename = sanitize_filename(file)
+                zip_files.append(os.path.join(DOWNLOAD_DIR, safe_filename))
     
     if not zip_files:
         print(f"No ZIP files found in {DOWNLOAD_DIR}")
@@ -782,10 +834,22 @@ def process_existing_zips(xslt_transformer):
     
     return total_xml_files_found, total_xml_files_processed
 
-def process_stig_zip(zip_path, xslt_transformer):
+def process_stig_zip(zip_path: str, xslt_transformer) -> Tuple[int, int]:
     """
-    Extracts a .zip file, finds all .xml files, and converts them to Markdown.
-    Returns: (xml_files_found, xml_files_processed_successfully)
+    Extract XML files from a ZIP archive and convert them to Markdown.
+    
+    Opens a ZIP file, finds all XML files (excluding macOS resource forks),
+    and converts each one to Markdown format using the provided XSLT transformer.
+    Output files are saved to the configured output directory.
+    
+    Args:
+        zip_path: Path to the ZIP file to process
+        xslt_transformer: The XSLT transformation function from lxml.etree.XSLT
+    
+    Returns:
+        A tuple containing:
+        - xml_files_found: Number of XML files found in the ZIP
+        - xml_files_processed: Number of XML files successfully converted to Markdown
     """
     print(f"\nProcessing {zip_path}...")
     xml_files_found = 0
@@ -810,8 +874,10 @@ def process_stig_zip(zip_path, xslt_transformer):
                         markdown_result = xslt_transformer(xml_doc)
                         
                         # Create a clean filename for the output
+                        # Sanitize the base filename to prevent directory traversal
                         base_name = os.path.splitext(os.path.basename(file_info.filename))[0]
-                        output_md_path = os.path.join(OUTPUT_DIR, f"{base_name}.md")
+                        safe_base_name = sanitize_filename(base_name)
+                        output_md_path = os.path.join(OUTPUT_DIR, f"{safe_base_name}.md")
                         
                         # Save the transformed content
                         with open(output_md_path, 'w', encoding='utf-8') as f:
@@ -833,7 +899,15 @@ def process_stig_zip(zip_path, xslt_transformer):
 
 
 def parse_arguments():
-    """Parse command-line arguments."""
+    """
+    Parse command-line arguments for the STIG converter.
+    
+    Defines all available command-line options including scraping limits,
+    download options, processing modes, and output verbosity.
+    
+    Returns:
+        argparse.Namespace: Parsed command-line arguments
+    """
     parser = argparse.ArgumentParser(
         description='STIG XML to Markdown Converter - Downloads STIG files from cyber.mil and converts them to Markdown',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -882,7 +956,18 @@ Examples:
     return parser.parse_args()
 
 def main():
-    """Main function to run the STIG downloader and converter."""
+    """
+    Main entry point for the STIG downloader and converter.
+    
+    Orchestrates the complete workflow:
+    1. Sets up directories and loads XSLT transformer
+    2. Optionally scrapes STIG download links from cyber.mil
+    3. Optionally downloads ZIP files
+    4. Processes ZIP files to convert XCCDF XML to Markdown
+    5. Displays comprehensive statistics about the operation
+    
+    Exits with code 1 on error, 0 on success.
+    """
     args = parse_arguments()
     
     # Handle conflicting arguments
